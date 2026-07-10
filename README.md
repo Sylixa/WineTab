@@ -1,4 +1,4 @@
-# XWinTab Photoshop Fix
+# WineTab
 
 A patched build of [XWinTab](https://github.com/Graham--M/XWinTab) that fixes
 tablet pressure and pen input for Adobe Photoshop (tested with Photoshop 2020)
@@ -76,7 +76,17 @@ is a normal Wine technique, not something exotic — see
    ```
    This is a one-time step: the setting is stored in the prefix and
    persists across launches and Wine version changes.
-3. Launch the app normally. In Lutris, just make sure the game's Wine
+3. Make sure Photoshop is configured to use Wintab rather than Windows'
+   native pointer/Ink API. Find (or create) `PSUserConfig.txt` at
+   `drive_c/users/<name>/AppData/Roaming/Adobe/Adobe Photoshop <version>/Adobe Photoshop <version> Settings/PSUserConfig.txt`
+   inside the prefix, and make sure it contains:
+   ```
+   UseSystemStylus 0
+   ```
+   Without this, Photoshop may try Windows' native stylus/Ink API first,
+   which Wine doesn't implement, silently bypassing Wintab (and this fix)
+   regardless of everything else being installed correctly.
+4. Launch the app normally. In Lutris, just make sure the game's Wine
    version is set to a working runner (see Requirements above); no special
    environment variables are needed for daily use.
 
@@ -101,3 +111,10 @@ Wintab calls the app is actually making.
   apps (Illustrator, Krita, etc.) haven't been verified. The fix should
   apply to them generically, but device- and driver-specific quirks are
   untested.
+
+## See also
+
+If you're running Clip Studio Paint under Wine instead of (or alongside)
+Photoshop, check out
+[CSPenguin-Installer](https://github.com/parka6060/CSPenguin-Installer) — a
+solid install script for getting Clip Studio Paint working on Linux.
