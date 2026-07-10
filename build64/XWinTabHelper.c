@@ -27,6 +27,7 @@
 #define _WIN32 1
 
 #include <sys/poll.h>
+#include <time.h>
 
 #include "XWinTabTypes.h"
 
@@ -36,6 +37,7 @@ typedef struct HelperDataTAG {
     xcb_connection_t *connection;
     EventCallback callback;
     uint8_t xiEventBase;
+    uint8_t xiMajorOpcode;
 } HelperData;
 
 static HelperData g_data;
@@ -44,105 +46,183 @@ static EventInfo g_eventInfo;
 
 static const char *g_requiredName;
 
-// Last real position seen from a DEVICE_VALUATOR event. ButtonPress/Release
-// and ProximityIn/Out events carry no axis data of their own (their x/y is
-// unset by X11), so we substitute this cached value instead of dispatching
-// a bogus (0, 0) which draws a stray line from the origin on stroke start.
+// Last real position seen from a raw motion event. ButtonPress/Release
+// events carry no axis data of their own, so we substitute this cached
+// value instead of dispatching a bogus (0, 0) which draws a stray line
+// from the origin on stroke start.
 static int32_t g_lastX = 0;
 static int32_t g_lastY = 0;
+
+// Legacy XInput1 event delivery (DeviceMotionNotify/DeviceValuator/etc, via
+// xcb_input_select_extension_event) has been observed to silently stall for
+// a given client after certain focus-grab transitions under Xwayland (e.g.
+// switching to a fullscreen app, clicking it with the mouse, then switching
+// back) -- confirmed via `xinput test-xi2` that raw XInput2 events keep
+// flowing through the exact same transition when XI1 delivery to this
+// process does not. So we use XInput2 raw events (focus-independent by
+// design) instead. Raw events have no distinct proximity type, so proximity
+// in/out is synthesized from motion activity/inactivity (see check_events).
+static int g_inProximity = 0;
+static struct timespec g_lastEventTime;
+
+static void mark_event_activity(void) {
+    clock_gettime(CLOCK_MONOTONIC, &g_lastEventTime);
+}
 
 
 // ----------------
 // XCB Event Handling
 //
 
+static double fp3232_to_double(xcb_input_fp3232_t v) {
+    return (double) v.integral + (double) v.frac / 4294967296.0;
+}
+
+// Sends a synthetic proximity-in using the last known position, if we
+// aren't already marked as in proximity. Raw XI2 events carry no proximity
+// notion of their own, so this is inferred from motion/button activity.
+static void ensure_proximity_in(unsigned int time) {
+    if (g_inProximity)
+        return;
+    g_inProximity = 1;
+
+    g_eventInfo.type = kEventTypeProximityIn;
+    g_eventInfo.time = time;
+    g_eventInfo.x = g_lastX;
+    g_eventInfo.y = g_lastY;
+    g_eventInfo.pressure = 0;
+    g_eventInfo.xTilt = 0;
+    g_eventInfo.yTilt = 0;
+    g_data.callback(&g_eventInfo);
+    g_eventInfo.type = kEventTypeUnknown;
+}
+
+static void handle_raw_motion(xcb_input_raw_motion_event_t *event) {
+    if (event->sourceid != g_data.device.id)
+        return;
+
+    uint32_t *mask = xcb_input_raw_button_press_valuator_mask(
+        (xcb_input_raw_button_press_event_t *) event);
+    int mask_words = xcb_input_raw_button_press_valuator_mask_length(
+        (xcb_input_raw_button_press_event_t *) event);
+    xcb_input_fp3232_t *values = xcb_input_raw_button_press_axisvalues(
+        (xcb_input_raw_button_press_event_t *) event);
+
+    int32_t x = g_lastX, y = g_lastY;
+    int pressure = g_eventInfo.pressure;
+    int xTilt = g_eventInfo.xTilt, yTilt = g_eventInfo.yTilt;
+    int got_position = 0;
+    int value_idx = 0;
+
+    for (int bit = 0; bit < mask_words * 32; bit++) {
+        if (!(mask[bit / 32] & (1u << (bit % 32))))
+            continue;
+
+        double v = fp3232_to_double(values[value_idx++]);
+        switch (bit) {
+        case 0: x = (int32_t) v; got_position = 1; break;
+        case 1: y = (int32_t) v; got_position = 1; break;
+        case 2: pressure = (int) v; break;
+        case 3: xTilt = (int) v; break;
+        case 4: yTilt = (int) v; break;
+        default: break;
+        }
+    }
+
+    if (!got_position)
+        return;
+
+    mark_event_activity();
+    ensure_proximity_in(event->time);
+
+    g_lastX = x;
+    g_lastY = y;
+
+    g_eventInfo.type = kEventTypeMotionNotify;
+    g_eventInfo.time = event->time;
+    g_eventInfo.x = x;
+    g_eventInfo.y = y;
+    g_eventInfo.pressure = pressure;
+    g_eventInfo.xTilt = xTilt;
+    g_eventInfo.yTilt = yTilt;
+    g_data.callback(&g_eventInfo);
+    g_eventInfo.type = kEventTypeUnknown;
+}
+
+static void handle_raw_button(xcb_input_raw_button_press_event_t *event, int is_press) {
+    if (event->sourceid != g_data.device.id)
+        return;
+
+    mark_event_activity();
+    ensure_proximity_in(event->time);
+
+    g_eventInfo.type = is_press ? kEventTypeButtonPress : kEventTypeButtonRelease;
+    g_eventInfo.time = event->time;
+    g_eventInfo.x = g_lastX;
+    g_eventInfo.y = g_lastY;
+    g_eventInfo.pressure = 0;
+    g_eventInfo.xTilt = 0;
+    g_eventInfo.yTilt = 0;
+
+    if (event->detail > 0 && event->detail < 32) {
+        if (is_press)
+            g_eventInfo.buttonsState |= 1 << (event->detail - 1);
+        else
+            g_eventInfo.buttonsState &= ~(1 << (event->detail - 1));
+    }
+
+    g_data.callback(&g_eventInfo);
+    g_eventInfo.type = kEventTypeUnknown;
+}
+
 static void handle_event(xcb_generic_event_t *xcb_event) {
-    const uint8_t kDeviceIDMask = 0x7f;
-    const uint8_t kMoreEventsMask = 0x80;
+    if ((xcb_event->response_type & 0x7f) != XCB_GE_GENERIC)
+        return;
 
-    EventType type = kEventTypeUnknown;
-    uint8_t ev_type = xcb_event->response_type - g_data.xiEventBase;
+    xcb_ge_generic_event_t *ge = (xcb_ge_generic_event_t *) xcb_event;
+    if (ge->extension != g_data.xiMajorOpcode)
+        return;
 
-    switch (ev_type) {
-    case XCB_INPUT_DEVICE_BUTTON_PRESS:
-        type = kEventTypeButtonPress;
+    switch (ge->event_type) {
+    case XCB_INPUT_RAW_MOTION:
+        handle_raw_motion((xcb_input_raw_motion_event_t *) ge);
         break;
-    case XCB_INPUT_DEVICE_BUTTON_RELEASE:
-        type = kEventTypeButtonRelease;
+    case XCB_INPUT_RAW_BUTTON_PRESS:
+        handle_raw_button((xcb_input_raw_button_press_event_t *) ge, 1);
         break;
-    case XCB_INPUT_PROXIMITY_IN:
-        type = kEventTypeProximityIn;
-        break;
-    case XCB_INPUT_PROXIMITY_OUT:
-        type = kEventTypeProximityOut;
-        break;
-    case XCB_INPUT_DEVICE_MOTION_NOTIFY:
-        type = kEventTypeMotionNotify;
-        break;
-    case XCB_INPUT_DEVICE_VALUATOR:
+    case XCB_INPUT_RAW_BUTTON_RELEASE:
+        handle_raw_button((xcb_input_raw_button_press_event_t *) ge, 0);
         break;
     default:
+        break;
+    }
+}
+
+// How long to wait after the last motion/button activity before synthesizing
+// a proximity-out (pen lifted out of range). Raw XI2 events carry no
+// proximity notion of their own so this has to be inferred.
+static const long kProximityTimeoutMs = 200;
+
+static void check_proximity_timeout(void) {
+    if (!g_inProximity)
         return;
-    }
 
-    if (ev_type == XCB_INPUT_DEVICE_VALUATOR) {
-        // We should be sent a device valuator event directly after receiving
-        // one of the events we selected.
-        xcb_input_device_valuator_event_t *event;
-        event = (xcb_input_device_valuator_event_t *) xcb_event;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
 
-        if (event->device_id != g_data.device.id || !g_eventInfo.type)
-            return;
+    long elapsed_ms = (now.tv_sec - g_lastEventTime.tv_sec) * 1000 +
+                      (now.tv_nsec - g_lastEventTime.tv_nsec) / 1000000;
+    if (elapsed_ms < kProximityTimeoutMs)
+        return;
 
-        if (event->first_valuator != 0) {
-            // You may be sent multiple valuator events if the number of axes
-            // doesn't fit into one event. We are only interested in the first
-            // set of axes.
-            g_eventInfo.type = kEventTypeUnknown;
-            return;
-        }
-
-        if (event->num_valuators > 4)
-            g_eventInfo.yTilt = event->valuators[4];
-        if (event->num_valuators > 3)
-            g_eventInfo.xTilt = event->valuators[3];
-        g_eventInfo.x = event->valuators[0];
-        g_eventInfo.y = event->valuators[1];
-        g_eventInfo.pressure = event->valuators[2];
-        g_lastX = g_eventInfo.x;
-        g_lastY = g_eventInfo.y;
-    }
-    else {
-        // All our selected events have the same structure
-        xcb_input_device_key_press_event_t *event;
-        event = (xcb_input_device_key_press_event_t *) xcb_event;
-
-        if ((event->device_id & kDeviceIDMask) != g_data.device.id)
-            return;
-
-        g_eventInfo.x = g_lastX;
-        g_eventInfo.y = g_lastY;
-        g_eventInfo.pressure = 0;
-        g_eventInfo.xTilt = 0;
-        g_eventInfo.yTilt = 0;
-
-        g_eventInfo.type = type;
-        g_eventInfo.time = event->time;
-
-        if (ev_type == XCB_INPUT_DEVICE_BUTTON_PRESS) {
-            if (event->detail > 0 && event->detail < 32)
-                g_eventInfo.buttonsState |= 1 << (event->detail - 1);
-        }
-
-        if (ev_type == XCB_INPUT_DEVICE_BUTTON_RELEASE) {
-            if (event->detail > 0 && event->detail < 32)
-                g_eventInfo.buttonsState &= ~(1 << (event->detail - 1));
-        }
-
-        if (event->device_id & kMoreEventsMask)
-            return;
-    }
-
+    g_inProximity = 0;
+    g_eventInfo.type = kEventTypeProximityOut;
+    g_eventInfo.time = (unsigned int) (now.tv_sec * 1000 + now.tv_nsec / 1000000);
+    g_eventInfo.x = g_lastX;
+    g_eventInfo.y = g_lastY;
+    g_eventInfo.pressure = 0;
+    g_eventInfo.xTilt = 0;
+    g_eventInfo.yTilt = 0;
     g_data.callback(&g_eventInfo);
     g_eventInfo.type = kEventTypeUnknown;
 }
@@ -158,13 +238,11 @@ static int check_events(unsigned int timeout) {
 
     xcb_generic_event_t *xcb_event = NULL;
     while (xcb_event = xcb_poll_for_event(g_data.connection)) {
-        // Errors have a response type of 0.
-        // We are only interested in events that can be in the
-        // event base allocated to the XInput extension.
-        if (xcb_event->response_type < g_data.xiEventBase)
-            continue;
         handle_event(xcb_event);
+        free(xcb_event);
     }
+
+    check_proximity_timeout();
 
     return !xcb_connection_has_error(g_data.connection);
 }
@@ -174,75 +252,29 @@ static int check_events(unsigned int timeout) {
 // Event Subscription
 //
 
-static int get_event_classes(xcb_input_event_class_t *classes) {
-    int has_button = 0;
-    int has_proximity = 0;
-    int has_valuator = 0;
-    int count = 0;
-
-    // We're supposed to get the event base for each class on a per device basis
-    // but if the XInput library is going to cheat, so will we. The events all
-    // have a fixed offset relative to the same event_base.
-
+static int select_events() {
     // No free(), reply data belongs to cache.
     const xcb_query_extension_reply_t *ext_info;
     ext_info = xcb_get_extension_data(g_data.connection, &xcb_input_id);
-    int base = g_data.xiEventBase = ext_info->first_event;
-
-    uint8_t device_id = (uint8_t) g_data.device.id;
-
-    // We will leave the device open to receive events about it.
-    xcb_input_open_device_cookie_t cookie;
-    cookie = xcb_input_open_device(g_data.connection, device_id);
-
-    xcb_input_open_device_reply_t *reply;
-    xcb_generic_error_t *error;
-    reply = xcb_input_open_device_reply(g_data.connection, cookie, &error);
-
-    if (error) return 0;
-
-    xcb_input_input_class_info_t *info;
-    info = xcb_input_open_device_class_info(reply);
-
-    // SelectExtensionEvent wants a list of event numbers or'd with the device
-    // ID. The events are offset by the event base. That's what the macros in
-    // the XInput headers are doing.
-    for (int i = 0; i < reply->num_classes; i++) {
-        xcb_input_event_class_t cls = (g_data.device.id << 8) | base;
-
-        if (info[i].class_id == XCB_INPUT_INPUT_CLASS_BUTTON) {
-            if (has_button) continue;
-            has_button = 1;
-
-            classes[count++] = cls + XCB_INPUT_DEVICE_BUTTON_PRESS;
-            classes[count++] = cls + XCB_INPUT_DEVICE_BUTTON_RELEASE;
-        }
-        else if (info[i].class_id == XCB_INPUT_INPUT_CLASS_PROXIMITY) {
-            if (has_proximity) continue;
-            has_proximity = 1;
-
-            classes[count++] = cls + XCB_INPUT_PROXIMITY_IN;
-            classes[count++] = cls + XCB_INPUT_PROXIMITY_OUT;
-        }
-        else if (info[i].class_id == XCB_INPUT_INPUT_CLASS_VALUATOR) {
-            if (has_valuator) continue;
-            has_valuator = 1;
-
-            classes[count++] = cls + XCB_INPUT_DEVICE_MOTION_NOTIFY;
-        }
-    }
-
-    free(reply);
-    return count;
-}
-
-static int select_events() {
-    int num_classes = 0;
-    xcb_input_event_class_t event_classes[5];
-
-    num_classes = get_event_classes(event_classes);
-    if (!num_classes)
+    if (!ext_info || !ext_info->present)
         return 0;
+    g_data.xiEventBase = ext_info->first_event;
+    g_data.xiMajorOpcode = ext_info->major_opcode;
+
+    // A client must announce the XI2 version it supports before any other
+    // XI2 request (like XISelectEvents with XI2 event masks) will be
+    // accepted by the server.
+    xcb_input_xi_query_version_cookie_t ver_cookie;
+    ver_cookie = xcb_input_xi_query_version(g_data.connection, 2, 2);
+    xcb_generic_error_t *ver_error = NULL;
+    xcb_input_xi_query_version_reply_t *ver_reply;
+    ver_reply = xcb_input_xi_query_version_reply(g_data.connection, ver_cookie, &ver_error);
+    if (ver_error || !ver_reply) {
+        free(ver_error);
+        free(ver_reply);
+        return 0;
+    }
+    free(ver_reply);
 
     const xcb_setup_t *setup = xcb_get_setup(g_data.connection);
     if (!setup->roots_len)
@@ -251,8 +283,25 @@ static int select_events() {
     xcb_screen_iterator_t screen_itr = xcb_setup_roots_iterator(setup);
     xcb_window_t window = screen_itr.data->root;
 
-    xcb_input_select_extension_event(g_data.connection, window,
-                                        num_classes, event_classes);
+    // Raw events (focus-independent, unlike regular XI2/XI1 device events)
+    // for just our tablet's stylus device -- see the comment above
+    // g_inProximity for why we use these instead of legacy XInput1 events.
+    struct {
+        xcb_input_event_mask_t header;
+        uint32_t mask;
+    } req;
+    // Raw events can only be selected for XIAllDevices/XIAllMasterDevices,
+    // not for an individual slave device id -- selecting on our specific
+    // stylus id silently degrades under Xwayland (events only trickle
+    // through opportunistically, e.g. while another client also holds a
+    // valid raw selection). Select broadly and filter by sourceid instead.
+    req.header.deviceid = XCB_INPUT_DEVICE_ALL;
+    req.header.mask_len = 1;
+    req.mask = XCB_INPUT_XI_EVENT_MASK_RAW_MOTION |
+               XCB_INPUT_XI_EVENT_MASK_RAW_BUTTON_PRESS |
+               XCB_INPUT_XI_EVENT_MASK_RAW_BUTTON_RELEASE;
+
+    xcb_input_xi_select_events(g_data.connection, window, 1, &req.header);
 
     xcb_flush(g_data.connection);
     return 1;
