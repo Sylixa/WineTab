@@ -44,6 +44,9 @@ Same license as upstream XWinTab: MIT (see `build64/LICENSE`).
 
 ## Building
 
+Prebuilt binaries are attached to the [Releases](../../releases) page if you'd
+rather skip building it yourself.
+
 Needs `mingw-w64-gcc` (or `x86_64-w64-mingw32-gcc`) and `winegcc`:
 
 ```bash

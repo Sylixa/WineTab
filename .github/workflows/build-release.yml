@@ -1,0 +1,64 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 wine wine64 libxcb1-dev libxcb-xinput-dev zip
+
+      - name: Build wintab32.dll and XWinTabHelper.dll.so
+        working-directory: build64
+        run: |
+          winegcc -o XWinTabHelper.dll.so -shared -O2 XWinTabHelper.c XWinTabHelper.dll.spec -lxcb -lxcb-xinput
+          x86_64-w64-mingw32-gcc -shared -O2 -o wintab32.dll WinTab.c wintab32.def
+
+      - name: Package release archive
+        run: |
+          mkdir -p dist
+          cp build64/wintab32.dll build64/XWinTabHelper.dll.so dist/
+          cp build64/LICENSE dist/ 2>/dev/null || true
+          cp build64/NOTICE dist/ 2>/dev/null || true
+          cp README.md dist/
+          cd dist && zip -r ../xwintab-photoshop-fix.zip .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xwintab-photoshop-fix
+          path: xwintab-photoshop-fix.zip
+
+      # Tag pushes (v1.0.0 etc) make a proper versioned release.
+      - name: Create tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: xwintab-photoshop-fix.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Manual trigger (Actions tab -> Run workflow) makes/updates a rolling
+      # "latest-build" pre-release, so a fresh binary is always available on
+      # demand without needing to cut a version tag first.
+      - name: Create/update rolling pre-release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: Latest build (from main)
+          prerelease: true
+          files: xwintab-photoshop-fix.zip
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
