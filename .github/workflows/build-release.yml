@@ -15,7 +15,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 wine wine64 libxcb1-dev libxcb-xinput-dev zip
+          sudo apt-get install -y mingw-w64 wine wine64 wine-dev libxcb1-dev libxcb-xinput-dev zip
 
       - name: Build wintab32.dll and XWinTabHelper.dll.so
         working-directory: build64
