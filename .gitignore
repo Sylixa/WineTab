@@ -1,0 +1,6 @@
+/base/
+/patched-ref/
+*.dll
+*.dll.so
+*.o
+*.log
