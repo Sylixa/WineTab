@@ -1,0 +1,18 @@
+--- "/mnt/storage/software/Adobe Photoshop 2020/Required/CEP/extensions/com.adobe.photoshop.crema/CSXS/manifest.xml.bak"	2026-07-11 01:11:42.908458226 +0700
++++ "/mnt/storage/software/Adobe Photoshop 2020/Required/CEP/extensions/com.adobe.photoshop.crema/CSXS/manifest.xml"	2026-07-11 01:12:15.340962229 +0700
+@@ -22,6 +22,7 @@
+                     <MainPath>./index.html</MainPath>
+                     <CEFCommandLine>
+                         <Parameter>--enable-nodejs</Parameter>
++                        <Parameter>--use-angle=gl</Parameter>
+                     </CEFCommandLine>
+                 </Resources>
+                 <Lifecycle>
+@@ -54,6 +55,7 @@
+                     <MainPath>./index.html</MainPath>
+                     <CEFCommandLine>
+                         <Parameter>--enable-nodejs</Parameter>
++                        <Parameter>--use-angle=gl</Parameter>
+                     </CEFCommandLine>
+                 </Resources>
+                 <Lifecycle>

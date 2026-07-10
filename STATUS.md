@@ -81,3 +81,54 @@ no special env vars needed for daily use.
 The 11.x freezing/glitching is a separate, unexplored bug (graphics
 backend / DXVK-related, not input-related) — worth a fresh investigation
 of its own if newer Wine is wanted later, but out of scope here.
+
+## Bonus fix: "Export As" black panel
+
+Not a tablet/input bug, but found and fixed in the same investigation
+using this same prefix, so documented here too.
+
+**Symptom**: File → Export → Export As opens a window, but its content is
+entirely black.
+
+**Cause**: Photoshop's "Export As" (and "Save for Web", non-legacy) panels
+are actually Adobe CEP (Common Extensibility Platform) extensions —
+real embedded Chromium/CEF instances (`Required/CEP/CEPHtmlEngine.exe`),
+not native Win32 dialogs. "Save for Web (Legacy)" is the old native
+dialog and works fine, which is what made this diagnosable as CEF-specific
+rather than a general Photoshop/Wine rendering problem.
+
+Confirmed via that engine's own Chromium log files (at
+`drive_c/users/<name>/AppData/Local/Temp/CEPHtmlEngine9-*-com.adobe.WEBPA.crema.save*.log`,
+enabled by default, no extra flags needed) that the real error is ANGLE
+(Chromium's D3D11/GL translation layer) failing to create a swap chain:
+
+```
+rx::SwapChain11::reset(579): Could not create additional swap chains or
+offscreen surfaces, HRESULT: 0x80004001 (E_NOTIMPL)
+eglCreateWindowSurface failed with error EGL_BAD_ALLOC
+```
+
+i.e. ANGLE's D3D11 backend hits something Wine's D3D11 (wined3d/DXVK)
+doesn't implement, so it never gets a render target and the panel stays
+black. This is a narrower, more specific issue than Wine's
+DirectComposition gap (which was the earlier working theory) — it's an
+ANGLE/D3D11 problem inside the bundled CEF build, not a Wine window-
+compositing problem.
+
+**Fix**: Adobe CEP extensions support injecting extra Chromium command-
+line flags via a `CEFCommandLine` block in the extension's
+`CSXS/manifest.xml`. Added `--use-angle=gl` (forces ANGLE to render via
+native OpenGL instead of D3D11) to both extensions in
+`Required/CEP/extensions/com.adobe.photoshop.crema/CSXS/manifest.xml`
+(original backed up as `manifest.xml.bak` in the same folder). Wine's
+OpenGL passthrough to the host Mesa driver is far more mature than its
+D3D11/DirectComposition stack, so this sidesteps the broken path
+entirely — Export As now renders correctly. Slight perceived sluggishness
+in the panel is a plausible real tradeoff (GL passthrough vs. a working
+D3D11+dcomp compositor path), not necessarily just perception.
+
+Confirmed via process inspection (`ps aux | grep CEPHtmlEngine`) that this
+is CEF-specific: only auxiliary panels (this export panel, and a
+background `com.adobe.Butler.backend` service) spawn `CEPHtmlEngine.exe`
+processes. The main canvas/document rendering is Photoshop's own native
+engine, not CEF, and was never affected by this.
