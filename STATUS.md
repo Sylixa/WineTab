@@ -27,10 +27,25 @@
    Fixed by caching last-known real position (`g_lastX`/`g_lastY`) and using
    that instead of `(0, 0)`.
 
-## Current working state
+7. Found and fixed the stall-after-focus-transition bug (see full detail in
+   git commit `93c7ac2` / "Rewrite event delivery to use XInput2 raw
+   events"): legacy XInput1 event delivery in `XWinTabHelper.c` silently
+   stalls for this client after certain focus-grab transitions under
+   Xwayland (fullscreen app + mouse click on it, then back to Photoshop).
+   Diagnosed with `xinput test-xi2` proving the X11/Xwayland layer itself
+   kept delivering events fine even while the app was stuck — pointing at
+   the legacy XI1 delivery path specifically. Rewrote event
+   subscription/parsing to use XInput2 raw motion/button events instead
+   (focus-independent by design), selecting on `XIAllDevices` and filtering
+   by each event's `sourceid` (raw events can't be selected for an
+   individual slave device id — an earlier attempt that tried this
+   regressed and broke on any alt-tab, not just the fullscreen+click case).
+
+## Current working state — all known issues fixed
 
 - **Pressure sensitivity: works.**
 - **Curve/motion streaming: works.**
+- **Stall after fullscreen+mouse-click alt-tab: fixed.**
 - Files changed (persistent, already in place):
   - `/mnt/storage/software/Adobe Photoshop 2020/wintab32.dll` — our patched
     build (backup of the old dormant v0.2 at `wintab32.dll.v0.2.bak` in same
@@ -39,35 +54,30 @@
     patched build
   - Registry: `HKCU\Software\Wine\DllOverrides\wintab32 = native` (set in
     prefix `/mnt/storage/software/softwareprefix`, persists)
-- **Wine runner must be `wine-8.0-staging-tkg-amd64`** (Lutris runner dir) —
-  system default `wine-11.12-staging` crashes Photoshop outright on launch.
-  In Lutris: set that game's Wine version dropdown accordingly; no special
-  env vars needed for daily use.
+- The fix is entirely prefix-local (the two files above + the registry key),
+  so it's **Wine-version-independent** — any Wine binary pointed at this
+  prefix picks it up automatically, no per-version reinstall needed.
 
-## Known remaining bug (being worked on next)
+## Wine version recommendation
 
-After: Photoshop → switch to a **fullscreen app** → **mouse-click** inside
-that fullscreen app → switch back to Photoshop → drawing breaks completely
-(both pen and mouse) until Photoshop is restarted.
+Tested several Lutris runner builds for base Photoshop stability (separate
+from the tablet fix, which held identically across all of them since it's
+prefix-local):
 
-- Does NOT reproduce if the fullscreen app is only clicked with the pen.
-- Confirmed via `xinput test-xi2 --root` (raw XInput2) that raw tablet
-  events (position + pressure) keep flowing fine at the X11/Xwayland layer
-  even while Photoshop is in the broken state — so this is not an
-  Xwayland/compositor-level event delivery failure.
-- `XWinTabHelper.c` uses **legacy XInput 1.x** (`xcb_input_select_extension_event`,
-  `DeviceMotionNotify`/`DeviceValuator`/`DeviceButtonPress`) for event
-  delivery, not XInput2. Empirically, while a second process
-  (`xinput test-xi2 --root`) was actively holding an XI2 event selection on
-  the same device, Photoshop's drawing spontaneously recovered (in a
-  degraded "mouse mode" — drawable, but 0 pressure) — and broke again the
-  moment that diagnostic process exited.
-- Working theory: Xwayland's legacy XInput1 event delivery to a given
-  client gets stuck/starved after certain focus-grab transitions (mouse
-  click on another window), while XInput2 raw events keep flowing reliably
-  through the same transition regardless of focus.
-- Planned fix: rewrite the event-subscription/parsing portion of
-  `XWinTabHelper.c` to use XInput2 (raw motion/button events via
-  `xcb_input_xi_select_events` + `xcb_input_raw_motion_event_t` etc.)
-  instead of the legacy XInput1 path, since XI2 has proven reliable through
-  the exact scenario that breaks XI1.
+| Runner | Result |
+|---|---|
+| system `wine-staging` 11.12-1 (pacman) | Crashes on launch outright |
+| `wine-11.7-staging-tkg-amd64` | Process stays alive but UI never appears |
+| `wine-11.0-amd64` | UI appears but heavy visual glitches / freezing — unrelated graphics-backend regression, not investigated further |
+| `wine-10.4-staging-tkg-amd64` | **Clean — no glitches, no freezing, PNG export works, tablet fix fully holds including the fullscreen/alt-tab scenario** |
+| `wine-8.0-staging-tkg-amd64` | Clean, fully working (original baseline before newer versions were tried) |
+
+**Recommendation: use `wine-10.4-staging-tkg-amd64`** — newer than the
+original 8.0 baseline, fixes whatever made 11.x freeze, and confirmed clean
+across the full test cycle (pressure, curve, alt-tab/fullscreen stall,
+PNG export). In Lutris: set that game's Wine version dropdown accordingly;
+no special env vars needed for daily use.
+
+The 11.x freezing/glitching is a separate, unexplored bug (graphics
+backend / DXVK-related, not input-related) — worth a fresh investigation
+of its own if newer Wine is wanted later, but out of scope here.
