@@ -19,7 +19,7 @@ jobs:
           sudo wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
           sudo wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/$(. /etc/os-release && echo $VERSION_CODENAME)/winehq-$(. /etc/os-release && echo $VERSION_CODENAME).sources
           sudo apt-get update
-          sudo apt-get install -y --install-recommends winehq-stable mingw-w64 libxcb1-dev libxcb-xinput-dev zip
+          sudo apt-get install -y --install-recommends winehq-stable wine-stable-dev mingw-w64 libxcb1-dev libxcb-xinput-dev zip
           which winegcc
 
       - name: Build wintab32.dll and XWinTabHelper.dll.so
