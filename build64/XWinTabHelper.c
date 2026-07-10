@@ -44,6 +44,13 @@ static EventInfo g_eventInfo;
 
 static const char *g_requiredName;
 
+// Last real position seen from a DEVICE_VALUATOR event. ButtonPress/Release
+// and ProximityIn/Out events carry no axis data of their own (their x/y is
+// unset by X11), so we substitute this cached value instead of dispatching
+// a bogus (0, 0) which draws a stray line from the origin on stroke start.
+static int32_t g_lastX = 0;
+static int32_t g_lastY = 0;
+
 
 // ----------------
 // XCB Event Handling
@@ -102,6 +109,8 @@ static void handle_event(xcb_generic_event_t *xcb_event) {
         g_eventInfo.x = event->valuators[0];
         g_eventInfo.y = event->valuators[1];
         g_eventInfo.pressure = event->valuators[2];
+        g_lastX = g_eventInfo.x;
+        g_lastY = g_eventInfo.y;
     }
     else {
         // All our selected events have the same structure
@@ -111,8 +120,8 @@ static void handle_event(xcb_generic_event_t *xcb_event) {
         if ((event->device_id & kDeviceIDMask) != g_data.device.id)
             return;
 
-        g_eventInfo.x = 0;
-        g_eventInfo.y = 0;
+        g_eventInfo.x = g_lastX;
+        g_eventInfo.y = g_lastY;
         g_eventInfo.pressure = 0;
         g_eventInfo.xTilt = 0;
         g_eventInfo.yTilt = 0;
