@@ -18,8 +18,8 @@
    documented in xwintab/PATCHES.md) — adds real `WTI_DEVICES` AXIS/pressure
    query handling that base XWinTab lacks.
 5. Cross-compiled that patched source ourselves (mingw-w64 + winegcc) since
-   no prebuilt binary exists for this fix. Build lives in
-   `~/Code/xwintab-photoshop-fix/build64/`.
+   no prebuilt binary exists for this fix. Build lives in this repo's
+   `build64/`.
 6. Found and fixed an additional bug in the patched source: `handle_event()`
    in `XWinTabHelper.c` hardcoded x/y to `(0,0)` for ButtonPress/ProximityIn
    events (only `DEVICE_VALUATOR` events carried real coordinates), causing
@@ -47,13 +47,11 @@
 - **Curve/motion streaming: works.**
 - **Stall after fullscreen+mouse-click alt-tab: fixed.**
 - Files changed (persistent, already in place):
-  - `/mnt/storage/software/Adobe Photoshop 2020/wintab32.dll` — our patched
-    build (backup of the old dormant v0.2 at `wintab32.dll.v0.2.bak` in same
-    dir)
-  - `/mnt/storage/software/Adobe Photoshop 2020/XWinTabHelper.dll.so` — our
-    patched build
+  - `<Photoshop install dir>/wintab32.dll` — our patched build (backup of
+    the old dormant v0.2 at `wintab32.dll.v0.2.bak` in same dir)
+  - `<Photoshop install dir>/XWinTabHelper.dll.so` — our patched build
   - Registry: `HKCU\Software\Wine\DllOverrides\wintab32 = native` (set in
-    prefix `/mnt/storage/software/softwareprefix`, persists)
+    the Wine prefix, persists)
 - The fix is entirely prefix-local (the two files above + the registry key),
   so it's **Wine-version-independent** — any Wine binary pointed at this
   prefix picks it up automatically, no per-version reinstall needed.
