@@ -65,8 +65,16 @@ static int32_t g_lastY = 0;
 static int g_inProximity = 0;
 static struct timespec g_lastEventTime;
 
-static void mark_event_activity(void) {
+// The X server's own timestamp (ms since server start) from the last real
+// event, used to stamp synthetic ProximityOut packets. Every real event's
+// packet is stamped from this same clock, so reusing it here (rather than
+// CLOCK_MONOTONIC, a completely different time base) keeps pkTime
+// consistent across the whole packet stream, including at pen-lift.
+static unsigned int g_lastEventXTime = 0;
+
+static void mark_event_activity(unsigned int event_time) {
     clock_gettime(CLOCK_MONOTONIC, &g_lastEventTime);
+    g_lastEventXTime = event_time;
 }
 
 
@@ -101,12 +109,12 @@ static void handle_raw_motion(xcb_input_raw_motion_event_t *event) {
     if (event->sourceid != g_data.device.id)
         return;
 
-    uint32_t *mask = xcb_input_raw_button_press_valuator_mask(
-        (xcb_input_raw_button_press_event_t *) event);
-    int mask_words = xcb_input_raw_button_press_valuator_mask_length(
-        (xcb_input_raw_button_press_event_t *) event);
-    xcb_input_fp3232_t *values = xcb_input_raw_button_press_axisvalues(
-        (xcb_input_raw_button_press_event_t *) event);
+    xcb_input_raw_button_press_event_t *raw_event =
+        (xcb_input_raw_button_press_event_t *) event;
+    uint32_t *mask = xcb_input_raw_button_press_valuator_mask(raw_event);
+    int mask_words = xcb_input_raw_button_press_valuator_mask_length(raw_event);
+    xcb_input_fp3232_t *values = xcb_input_raw_button_press_axisvalues(raw_event);
+    int value_count = xcb_input_raw_button_press_axisvalues_length(raw_event);
 
     int32_t x = g_lastX, y = g_lastY;
     int pressure = g_eventInfo.pressure;
@@ -117,6 +125,13 @@ static void handle_raw_motion(xcb_input_raw_motion_event_t *event) {
     for (int bit = 0; bit < mask_words * 32; bit++) {
         if (!(mask[bit / 32] & (1u << (bit % 32))))
             continue;
+
+        // Defensive: the mask's bit count should always match the
+        // axisvalues array length, but don't trust a driver/compositor
+        // edge case to guarantee that -- bail rather than read past the
+        // event's variable-length payload.
+        if (value_idx >= value_count)
+            break;
 
         double v = fp3232_to_double(values[value_idx++]);
         switch (bit) {
@@ -132,7 +147,7 @@ static void handle_raw_motion(xcb_input_raw_motion_event_t *event) {
     if (!got_position)
         return;
 
-    mark_event_activity();
+    mark_event_activity(event->time);
     ensure_proximity_in(event->time);
 
     g_lastX = x;
@@ -153,7 +168,7 @@ static void handle_raw_button(xcb_input_raw_button_press_event_t *event, int is_
     if (event->sourceid != g_data.device.id)
         return;
 
-    mark_event_activity();
+    mark_event_activity(event->time);
     ensure_proximity_in(event->time);
 
     g_eventInfo.type = is_press ? kEventTypeButtonPress : kEventTypeButtonRelease;
@@ -217,7 +232,7 @@ static void check_proximity_timeout(void) {
 
     g_inProximity = 0;
     g_eventInfo.type = kEventTypeProximityOut;
-    g_eventInfo.time = (unsigned int) (now.tv_sec * 1000 + now.tv_nsec / 1000000);
+    g_eventInfo.time = g_lastEventXTime;
     g_eventInfo.x = g_lastX;
     g_eventInfo.y = g_lastY;
     g_eventInfo.pressure = 0;
