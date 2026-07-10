@@ -4,3 +4,6 @@
 *.dll.so
 *.o
 *.log
+/*.md
+!/README.md
+!/STATUS.md

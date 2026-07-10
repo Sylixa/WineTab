@@ -2,44 +2,48 @@
 
 ## Problem chain found & fixed so far
 
-1. Wine's builtin `wintab32.dll` never streams intermediate motion packets —
-   only endpoint samples reach the app, so curvy strokes render as straight
-   lines (long-standing upstream Wine bug, unrelated to pressure itself).
+1. Wine's builtin `wintab32.dll` never streams intermediate motion packets.
+   Only the endpoint samples reach the app, so curvy strokes render as
+   straight lines (a long-standing upstream Wine bug, unrelated to pressure
+   itself).
 2. Photoshop actually loads `wintab32.dll` from its own install directory
-   (`.../Adobe Photoshop 2020/wintab32.dll`), not `system32` — Windows/Wine
-   DLL search order checks the app directory first. A stale **XWinTab v0.2**
-   build was already sitting there unused (dormant, no DllOverride existed to
-   activate it) since before this investigation.
-3. Installed XWinTab (https://github.com/Graham--M/XWinTab) v0.5.0 instead —
-   fixes the straight-line bug (proper motion streaming) but pressure was
-   still broken — v0.5.0 predates an unmerged upstream fix.
+   (`.../Adobe Photoshop 2020/wintab32.dll`), not `system32`, because
+   Windows/Wine's DLL search order checks the app directory first. A stale
+   **XWinTab v0.2** build was already sitting there unused (dormant, since
+   no DllOverride existed to activate it) from before this investigation
+   started.
+3. Installed XWinTab (https://github.com/Graham--M/XWinTab) v0.5.0 instead.
+   This fixes the straight-line bug (proper motion streaming), but pressure
+   was still broken, because v0.5.0 predates an unmerged upstream fix.
 4. Found the actual pressure fix in a fork:
    https://github.com/gurppt/flashcs6linux_deploy (xwintab/src, patches
-   documented in xwintab/PATCHES.md) — adds real `WTI_DEVICES` AXIS/pressure
-   query handling that base XWinTab lacks.
-5. Cross-compiled that patched source ourselves (mingw-w64 + winegcc) since
-   no prebuilt binary exists for this fix. Build lives in this repo's
+   documented in xwintab/PATCHES.md). It adds real `WTI_DEVICES`
+   AXIS/pressure query handling that base XWinTab lacks.
+5. Cross-compiled that patched source ourselves (mingw-w64 + winegcc), since
+   no prebuilt binary exists for this fix. The build lives in this repo's
    `build64/`.
 6. Found and fixed an additional bug in the patched source: `handle_event()`
    in `XWinTabHelper.c` hardcoded x/y to `(0,0)` for ButtonPress/ProximityIn
-   events (only `DEVICE_VALUATOR` events carried real coordinates), causing
-   every new stroke to start with a straight ray from the canvas origin.
-   Fixed by caching last-known real position (`g_lastX`/`g_lastY`) and using
-   that instead of `(0, 0)`.
+   events, because only `DEVICE_VALUATOR` events carried real coordinates.
+   This caused every new stroke to start with a straight ray from the
+   canvas origin. Fixed by caching the last-known real position
+   (`g_lastX`/`g_lastY`) and using that instead of `(0, 0)`.
 
 7. Found and fixed the stall-after-focus-transition bug (see full detail in
-   git commit `93c7ac2` / "Rewrite event delivery to use XInput2 raw
+   git commit `93c7ac2`, "Rewrite event delivery to use XInput2 raw
    events"): legacy XInput1 event delivery in `XWinTabHelper.c` silently
    stalls for this client after certain focus-grab transitions under
-   Xwayland (fullscreen app + mouse click on it, then back to Photoshop).
-   Diagnosed with `xinput test-xi2` proving the X11/Xwayland layer itself
-   kept delivering events fine even while the app was stuck — pointing at
-   the legacy XI1 delivery path specifically. Rewrote event
-   subscription/parsing to use XInput2 raw motion/button events instead
-   (focus-independent by design), selecting on `XIAllDevices` and filtering
-   by each event's `sourceid` (raw events can't be selected for an
-   individual slave device id — an earlier attempt that tried this
-   regressed and broke on any alt-tab, not just the fullscreen+click case).
+   Xwayland (for example, switching to a fullscreen app, clicking it with
+   the mouse, then switching back to Photoshop). This was diagnosed with
+   `xinput test-xi2`, which proved that the X11/Xwayland layer itself kept
+   delivering events fine even while the app was stuck, pointing at the
+   legacy XI1 delivery path specifically. The fix rewrites event
+   subscription/parsing to use XInput2 raw motion/button events instead,
+   which are focus-independent by design. It selects on `XIAllDevices` and
+   filters by each event's `sourceid`, because raw events can't be selected
+   for an individual slave device id — an earlier attempt that tried
+   selecting on the specific device id regressed and broke on any alt-tab,
+   not just the fullscreen-plus-click case.
 
 ## Current working state — all known issues fixed
 
@@ -47,14 +51,16 @@
 - **Curve/motion streaming: works.**
 - **Stall after fullscreen+mouse-click alt-tab: fixed.**
 - Files changed (persistent, already in place):
-  - `<Photoshop install dir>/wintab32.dll` — our patched build (backup of
-    the old dormant v0.2 at `wintab32.dll.v0.2.bak` in same dir)
+  - `<Photoshop install dir>/wintab32.dll` — our patched build (the old
+    dormant v0.2 build is backed up as `wintab32.dll.v0.2.bak` in the same
+    directory)
   - `<Photoshop install dir>/XWinTabHelper.dll.so` — our patched build
   - Registry: `HKCU\Software\Wine\DllOverrides\wintab32 = native` (set in
-    the Wine prefix, persists)
-- The fix is entirely prefix-local (the two files above + the registry key),
-  so it's **Wine-version-independent** — any Wine binary pointed at this
-  prefix picks it up automatically, no per-version reinstall needed.
+    the Wine prefix, where it persists)
+- The fix is entirely prefix-local (the two files above plus the registry
+  key), so it's **Wine-version-independent**: any Wine binary pointed at
+  this prefix picks it up automatically, with no per-version reinstall
+  needed.
 
 ## Wine version recommendation
 
@@ -66,19 +72,20 @@ prefix-local):
 |---|---|
 | system `wine-staging` 11.12-1 (pacman) | Crashes on launch outright |
 | `wine-11.7-staging-tkg-amd64` | Process stays alive but UI never appears |
-| `wine-11.0-amd64` | UI appears but heavy visual glitches / freezing — unrelated graphics-backend regression, not investigated further |
-| `wine-10.4-staging-tkg-amd64` | **Clean — no glitches, no freezing, PNG export works, tablet fix fully holds including the fullscreen/alt-tab scenario** |
-| `wine-8.0-staging-tkg-amd64` | Clean, fully working (original baseline before newer versions were tried) |
+| `wine-11.0-amd64` | UI appears but has heavy visual glitches and freezing; an unrelated graphics-backend regression, not investigated further |
+| `wine-10.4-staging-tkg-amd64` | **Clean: no glitches, no freezing, PNG export works, and the tablet fix fully holds including the fullscreen/alt-tab scenario** |
+| `wine-8.0-staging-tkg-amd64` | Clean and fully working (the original baseline before newer versions were tried) |
 
-**Recommendation: use `wine-10.4-staging-tkg-amd64`** — newer than the
-original 8.0 baseline, fixes whatever made 11.x freeze, and confirmed clean
-across the full test cycle (pressure, curve, alt-tab/fullscreen stall,
-PNG export). In Lutris: set that game's Wine version dropdown accordingly;
-no special env vars needed for daily use.
+**Recommendation: use `wine-10.4-staging-tkg-amd64`.** It's newer than the
+original 8.0 baseline, fixes whatever made 11.x freeze, and was confirmed
+clean across the full test cycle (pressure, curve, alt-tab/fullscreen
+stall, PNG export). In Lutris, just set that game's Wine version dropdown
+accordingly; no special environment variables are needed for daily use.
 
-The 11.x freezing/glitching is a separate, unexplored bug (graphics
-backend / DXVK-related, not input-related) — worth a fresh investigation
-of its own if newer Wine is wanted later, but out of scope here.
+The 11.x freezing/glitching is a separate, unexplored bug (likely graphics
+backend or DXVK-related, not input-related), and worth a fresh
+investigation of its own if newer Wine is wanted later, but that's out of
+scope here.
 
 ## Bonus fix: "Export As" black panel
 
@@ -88,12 +95,13 @@ using this same prefix, so documented here too.
 **Symptom**: File → Export → Export As opens a window, but its content is
 entirely black.
 
-**Cause**: Photoshop's "Export As" (and "Save for Web", non-legacy) panels
-are actually Adobe CEP (Common Extensibility Platform) extensions —
+**Cause**: Photoshop's "Export As" (and the non-legacy "Save for Web")
+panels are actually Adobe CEP (Common Extensibility Platform) extensions:
 real embedded Chromium/CEF instances (`Required/CEP/CEPHtmlEngine.exe`),
 not native Win32 dialogs. "Save for Web (Legacy)" is the old native
-dialog and works fine, which is what made this diagnosable as CEF-specific
-rather than a general Photoshop/Wine rendering problem.
+dialog and works fine, which is what made this diagnosable as a
+CEF-specific problem rather than a general Photoshop/Wine rendering
+problem.
 
 Confirmed via that engine's own Chromium log files (at
 `drive_c/users/<name>/AppData/Local/Temp/CEPHtmlEngine9-*-com.adobe.WEBPA.crema.save*.log`,
@@ -106,24 +114,25 @@ offscreen surfaces, HRESULT: 0x80004001 (E_NOTIMPL)
 eglCreateWindowSurface failed with error EGL_BAD_ALLOC
 ```
 
-i.e. ANGLE's D3D11 backend hits something Wine's D3D11 (wined3d/DXVK)
-doesn't implement, so it never gets a render target and the panel stays
-black. This is a narrower, more specific issue than Wine's
-DirectComposition gap (which was the earlier working theory) — it's an
-ANGLE/D3D11 problem inside the bundled CEF build, not a Wine window-
-compositing problem.
+In other words, ANGLE's D3D11 backend hits something that Wine's D3D11
+(wined3d/DXVK) doesn't implement, so it never gets a render target and the
+panel stays black. This is a narrower, more specific issue than Wine's
+DirectComposition gap (which was the earlier working theory): it's an
+ANGLE/D3D11 problem inside the bundled CEF build, not a Wine
+window-compositing problem.
 
-**Fix**: Adobe CEP extensions support injecting extra Chromium command-
-line flags via a `CEFCommandLine` block in the extension's
-`CSXS/manifest.xml`. Added `--use-angle=gl` (forces ANGLE to render via
-native OpenGL instead of D3D11) to both extensions in
+**Fix**: Adobe CEP extensions support injecting extra Chromium
+command-line flags via a `CEFCommandLine` block in the extension's
+`CSXS/manifest.xml`. Added `--use-angle=gl` (which forces ANGLE to render
+via native OpenGL instead of D3D11) to both extensions in
 `Required/CEP/extensions/com.adobe.photoshop.crema/CSXS/manifest.xml`
-(original backed up as `manifest.xml.bak` in the same folder). Wine's
-OpenGL passthrough to the host Mesa driver is far more mature than its
-D3D11/DirectComposition stack, so this sidesteps the broken path
-entirely — Export As now renders correctly. Slight perceived sluggishness
-in the panel is a plausible real tradeoff (GL passthrough vs. a working
-D3D11+dcomp compositor path), not necessarily just perception.
+(the original file is backed up as `manifest.xml.bak` in the same
+folder). Wine's OpenGL passthrough to the host Mesa driver is far more
+mature than its D3D11/DirectComposition stack, so this sidesteps the
+broken path entirely, and Export As now renders correctly. The panel
+feels slightly more sluggish afterward, which is plausibly a genuine
+tradeoff of GL passthrough versus a properly working D3D11+dcomp
+compositor path, rather than just a subjective impression.
 
 Confirmed via process inspection (`ps aux | grep CEPHtmlEngine`) that this
 is CEF-specific: only auxiliary panels (this export panel, and a
